@@ -10,4 +10,7 @@ class Experiment(Base):
  result=Column(JSON,nullable=True)
  error=Column(String(1000),nullable=True)
  snapshot=Column(JSON,nullable=False)
+ # Sealed lock-wait evidence snapshot; late observer rows never reach this JSON.
+ lock_evidence=Column(JSON,nullable=True)
+ evidence_sealed_at=Column(DateTime,nullable=True)
  created_at=Column(DateTime,server_default=func.now())

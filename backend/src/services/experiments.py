@@ -5,15 +5,24 @@ from src.config.settings import REDIS_URL
 from src.models.workload import Workload
 from src.models.candidate import Candidate
 from src.models.experiment import Experiment
+from src.services.lock_evidence import live_view,observations_for,summarize
 from src.utils.serialization import record
 queue=redis.Redis.from_url(REDIS_URL)
 def list_items():
- with Session() as s:return [record(r) for r in s.query(Experiment).order_by(Experiment.id.desc()).limit(100).all()]
+ with Session() as s:
+  out=[]
+  for r in s.query(Experiment).order_by(Experiment.id.desc()).limit(100).all():
+   item=record(r)
+   if r.lock_evidence is not None:item['lock_evidence']=r.lock_evidence
+   else:
+    obs=observations_for(s,r.id);item['lock_evidence']={'sealed_at':None,'observations':obs,'summary':summarize(obs)}
+   out.append(item)
+  return out
 def detail(item_id):
  with Session() as s:
   row=s.get(Experiment,item_id)
   if not row:raise HTTPException(404,'未找到试验')
-  return record(row)
+  item=record(row);item['lock_evidence']=live_view(s,row);return item
 def create(data):
  with Session() as s:
   c=s.get(Candidate,data.candidate_id)

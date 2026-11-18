@@ -5,6 +5,7 @@ from src.models.workload import Workload
 from src.models.candidate import Candidate
 from src.models.experiment import Experiment
 from src.models.telemetry import Telemetry
+from src.models.lock_observation import LockObservation
 from src.utils.security import hash_password
 def seed():
  Base.metadata.create_all(engine)

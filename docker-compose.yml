@@ -17,7 +17,9 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:-index-trial}-db
     environment: {MYSQL_DATABASE: indextrial, MYSQL_USER: trial, MYSQL_PASSWORD: trialpass, MYSQL_ROOT_PASSWORD: rootlocalpass}
     ports: ["${DB_PORT:-17741}:3306"]
-    volumes: ["dbdata:/var/lib/mysql"]
+    volumes:
+      - dbdata:/var/lib/mysql
+      - ./backend/mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s

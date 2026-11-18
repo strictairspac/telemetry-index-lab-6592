@@ -20,31 +20,53 @@ def _write_probe(conn):
  t=time.perf_counter()
  conn.execute(text("INSERT INTO telemetry(sensor_id,recorded_at,device_type,value) VALUES (999,'2026-11-17T12:00:00','pump',42.5)"),[{} for _ in range(20)])
  elapsed=(time.perf_counter()-t)*1000;conn.rollback();return round(elapsed,4)
-def run(snapshot):
+def run(snapshot,experiment_id=None,watch=None):
  w=snapshot['workload'];columns=snapshot['candidate']['columns']
  if not columns or any(c not in COLUMNS for c in columns) or len(set(columns))!=len(columns):raise ValueError('invalid index columns')
  params={'sensor':w['sensor_id'],'start':w['start_at'],'end':w['end_at']}
  query='SELECT id,sensor_id,recorded_at,device_type,value FROM telemetry WHERE sensor_id=:sensor AND recorded_at>=:start AND recorded_at<=:end'
  if w.get('device_type'):query+=' AND device_type=:device';params['device']=w['device_type']
  query+=' ORDER BY id'
+ def phase(name):
+  if watch and experiment_id is not None:watch.set_phase(experiment_id,name)
  with engine.connect() as conn:
-  if conn.execute(text("SELECT GET_LOCK('index_trial_serial',30)")).scalar()!=1:raise RuntimeError('another trial holds lock')
+  connection_id=conn.execute(text('SELECT CONNECTION_ID()')).scalar()
+  if watch and experiment_id is not None:watch.register(experiment_id,connection_id)
   try:
-   existing=conn.execute(text("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='telemetry' AND index_name='trial_candidate'")).scalar()
-   if existing:conn.execute(text('DROP INDEX trial_candidate ON telemetry'));conn.commit()
-   before=[dict(r) for r in conn.execute(text('EXPLAIN '+query),params).mappings()]
-   rows,before_ms,before_samples=_timed(conn,query,params)
-   write_before=_write_probe(conn)
-   conn.execute(text('CREATE INDEX trial_candidate ON telemetry ('+','.join('`'+c+'`' for c in columns)+')'));conn.commit()
-   conn.execute(text('ANALYZE TABLE telemetry')).all()
-   after=[dict(r) for r in conn.execute(text('EXPLAIN '+query),params).mappings()]
-   result,after_ms,after_samples=_timed(conn,query,params)
-   write_after=_write_probe(conn)
-   canonical=lambda records:hashlib.sha256(json.dumps(records,sort_keys=True).encode()).hexdigest()
-   return {'prefix':prefix_score(columns,w),'query':query,'parameters':params,'rows':len(result),'before_plan':before,'after_plan':after,'before_median_ms':before_ms,'after_median_ms':after_ms,'before_samples_ms':before_samples,'after_samples_ms':after_samples,'insert20_before_ms':write_before,'insert20_after_ms':write_after,'equal_results':canonical(rows)==canonical(result),'checksum':canonical(result),'preview':result[:10],'limitations':['5000-row deterministic dataset; timings include Python driver and cache effects','20-row write probe is rolled back; sequence gaps are normal','heuristic prefix score is not MySQL optimizer cost; no guaranteed speedup']}
-  finally:
-   conn.rollback()
+   phase('serial_lock')
+   if conn.execute(text("SELECT GET_LOCK('index_trial_serial',30)")).scalar()!=1:raise RuntimeError('another trial holds lock')
    try:
-    exists=conn.execute(text("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='telemetry' AND index_name='trial_candidate'")).scalar()
-    if exists:conn.execute(text('DROP INDEX trial_candidate ON telemetry'));conn.commit()
-   finally:conn.execute(text("SELECT RELEASE_LOCK('index_trial_serial')"));conn.commit()
+    phase('drop_legacy')
+    existing=conn.execute(text("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='telemetry' AND index_name='trial_candidate'")).scalar()
+    if existing:conn.execute(text('DROP INDEX trial_candidate ON telemetry'));conn.commit()
+    phase('baseline_plan')
+    before=[dict(r) for r in conn.execute(text('EXPLAIN '+query),params).mappings()]
+    phase('baseline_query')
+    rows,before_ms,before_samples=_timed(conn,query,params)
+    phase('write_probe_baseline')
+    write_before=_write_probe(conn)
+    phase('create_index')
+    conn.execute(text('CREATE INDEX trial_candidate ON telemetry ('+','.join('`'+c+'`' for c in columns)+')'));conn.commit()
+    phase('analyze')
+    conn.execute(text('ANALYZE TABLE telemetry')).all()
+    phase('candidate_plan')
+    after=[dict(r) for r in conn.execute(text('EXPLAIN '+query),params).mappings()]
+    phase('candidate_query')
+    result,after_ms,after_samples=_timed(conn,query,params)
+    phase('write_probe_candidate')
+    write_after=_write_probe(conn)
+    canonical=lambda records:hashlib.sha256(json.dumps(records,sort_keys=True).encode()).hexdigest()
+    return {'prefix':prefix_score(columns,w),'query':query,'parameters':params,'rows':len(result),'before_plan':before,'after_plan':after,'before_median_ms':before_ms,'after_median_ms':after_ms,'before_samples_ms':before_samples,'after_samples_ms':after_samples,'insert20_before_ms':write_before,'insert20_after_ms':write_after,'equal_results':canonical(rows)==canonical(result),'checksum':canonical(result),'preview':result[:10],'limitations':['5000-row deterministic dataset; timings include Python driver and cache effects','20-row write probe is rolled back; sequence gaps are normal','heuristic prefix score is not MySQL optimizer cost; no guaranteed speedup']}
+   finally:
+    try:
+     phase('cleanup')
+     conn.rollback()
+     try:
+      exists=conn.execute(text("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='telemetry' AND index_name='trial_candidate'")).scalar()
+      if exists:conn.execute(text('DROP INDEX trial_candidate ON telemetry'));conn.commit()
+     finally:conn.execute(text("SELECT RELEASE_LOCK('index_trial_serial')"));conn.commit()
+    finally:
+     if watch and experiment_id is not None:watch.unregister(experiment_id)
+  except Exception:
+   if watch and experiment_id is not None:watch.unregister(experiment_id)
+   raise

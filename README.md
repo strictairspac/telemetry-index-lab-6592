@@ -38,6 +38,9 @@ docker compose exec -T backend python -m scripts.seed_demo
 ## 算法与真实边界
 Python 对索引从左到右分析，匹配相等列每列 +40，首个时间范围列 +20 后停止，最高100。缺失首列停止。启发式不等于优化器成本。worker 使用 MySQL GET_LOCK 串行隔离，删除遗留试验索引 → 无候选基线 EXPLAIN/查询5次 → 建候选索引/ANALYZE → 查询5次和EXPLAIN → 校验有序全结果SHA-256 → 清理索引。数据固定、查询参数固定可复现，耗时受缓存和驱动波动影响，不保证提速。20 行写探针是真实 INSERT 后 ROLLBACK，可能消耗 auto_increment 序列号。试验只修改专用 telemetry 表，不能接受任意SQL或远端数据库。任务使用简单 Redis 单消费者，进程崩溃后的 running 任务不自动重试，保留状态供人工复查并新建任务。
 
+### 锁等待诊断（满 3 秒留证）
+worker 进程内有一个独立守护线程，用独立连接每 0.5 秒轮询 `performance_schema`（`metadata_locks`/`threads` 覆盖 GET_LOCK 命名锁与表元数据锁，`data_lock_waits`/`data_locks`/`innodb_trx` 覆盖 InnoDB 行锁）。建索引、写探针或任一阶段等锁满 3 秒，试验结果页即显示实际阻塞方（用户、来源连接、线程、正在执行的 SQL 与锁名）及所属阶段。诊断只读且与试验连接隔离：采样失败不会拖住试验，断档窗口记一条「未知」（阻塞方为空）并在下一周期自动恢复观测。证据按 `试验 × 阶段 × 连接` 归因，连接池把同一物理连接复用到下一次试验时两次证据各自归库；试验结束（成功或失败）先封存：快照写入 `experiments.lock_evidence`、观察行置 `sealed=1`，之后迟到的观测一律拒绝，结论不再改变。阈值 3 秒与轮询 0.5 秒定义在 `backend/src/constants/enums.py`。该账户需要 performance_schema 读权限，compose 首次初始化库时通过 `backend/mysql-init` 自动授权。
+
 ## 技术与目录
 Python3.11 / FastAPI / SQLAlchemy / PyMySQL / Redis；MySQL8.0；原生 HTML CSS ES modules；nginx1.27。恰好五容器 frontend/backend/worker/db/redis，均有健康探针。数据库、Redis、应用产物各用命名卷。
 
